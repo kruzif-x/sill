@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
 	<key>com.apple.application-identifier</key>
-	<string>9B2KKVM937.me.saffer.sill.mac</string>
+	<string>S6TR6PN5VQ.app.kruzif.sill.mac</string>
 	<key>com.apple.developer.team-identifier</key>
-	<string>9B2KKVM937</string>
+	<string>S6TR6PN5VQ</string>
 	<key>keychain-access-groups</key>
 	<array>
-		<string>9B2KKVM937.me.saffer.sill.mac</string>
+		<string>S6TR6PN5VQ.app.kruzif.sill.mac</string>
 	</array>
 </dict>
 </plist>
