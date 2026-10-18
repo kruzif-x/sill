@@ -1,0 +1,13 @@
+Sill
+Copyright 2026 Noah Saffer
+
+This product includes software developed as "Sill"
+(https://github.com/Saffsanity/sill), licensed under the Apache License,
+Version 2.0 (see LICENSE).
+
+This repository is a modified fork (github.com/kruzif-x/sill). The files
+marked in DIVERGENCE.md were changed; the changes are summarized there and in
+the commit history. The original copyright notice above is retained, as Apache
+License 2.0 section 4 requires.
+
+Modifications in this fork are Copyright 2026 Roland Chia.
