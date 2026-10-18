@@ -61,3 +61,13 @@ the same steps locally:
     Scripts/ci-local.sh              # swift build, the pure checks, the iOS simulator build
     Scripts/ci-local.sh --mutants    # also the mutants (an hour and more)
 
+
+## Identity: the macOS bundle id stays `me.saffer.sill.mac`
+
+Fork builds were tried under `app.kruzif.sill.mac`. It changes the app's designated
+requirement, so the login keychain item that holds the Mac's identity needs the user's
+approval before the app can read it: the app sat at "Status: Starting…" with a keychain
+prompt nobody could answer on a headless Mac, and no door came up. The iOS app keeps
+its own `app.kruzif.sill` (it never shared the Mac's keychain item). Moving the Mac id
+is a planned migration — new identity, re-pair every device — not a rename.
+
