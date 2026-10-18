@@ -28,6 +28,15 @@ enum OriginPolicy {
         /// On-link prefixes of the interfaces that are not tunnels or loopback.
         var prefixes: [(interface: String, network: [UInt8], bits: Int)] = []
 
+        /// True when a tunnel interface on this Mac holds a 100.64/10 address: a tailnet (Tailscale
+        /// among them) or another CGNAT tunnel is up, so a 100.64/10 peer whose arrival could not be
+        /// named belongs to that tunnel rather than to carrier space on the open internet.
+        var hasSharedSpaceTunnel: Bool {
+            owner.contains { address, interface in
+                IPBytes.isCarrierShared(address) && (kind[interface] ?? OriginPolicy.interfaceKind(name: interface)) == .tunnel
+            }
+        }
+
         init(kind: [String: InterfaceKind] = [:], owner: [[UInt8]: String] = [:],
              prefixes: [(interface: String, network: [UInt8], bits: Int)] = []) {
             self.kind = kind; self.owner = owner; self.prefixes = prefixes
@@ -77,6 +86,11 @@ enum OriginPolicy {
             return candidate && IPBytes.contains(network: p.network, bits: p.bits, address: source)
         }
         if onLink || IPBytes.isPrivate(source) { return .lan }
+        // Unknown arrival, source in carrier space: the internet, unless this Mac's own tunnel holds
+        // a 100.64/10 address. Then the peer is that tailnet's (Tailscale is the common one) and the
+        // remote door should admit it without the internet switch; a peer that did arrive on a LAN
+        // interface has already been judged above and stays internet.
+        if arrival == nil, IPBytes.isCarrierShared(source), interfaces.hasSharedSpaceTunnel { return .vpn }
         return .internet
     }
 

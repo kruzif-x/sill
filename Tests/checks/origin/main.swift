@@ -68,6 +68,15 @@ expect("169.254.1.2 with nothing known (link-local)", c("169.254.1.2"), .lan)
 expect("unknown arrival: on-link of a LAN interface", c("192.168.1.99"), .lan)
 expect("unknown arrival: public", c("198.51.100.4"), .internet)
 expect("unknown arrival: 100.64/10 on-link of bridge0 (any LAN interface)", c("100.72.9.9"), .lan)
+// A tailnet peer whose arrival could not be named: 100.64/10, with this Mac's own tunnel holding one
+// of those addresses (the fixture's utun4 at 100.88.123.45), is a VPN peer and not carrier space
+// from the open internet. With no tunnel holding one, it stays internet.
+expect("unknown arrival: 100.64/10 with a tailnet up", c("100.101.5.6"), .vpn)
+var noTailnet = ifs
+noTailnet.owner[b("100.88.123.45")] = nil
+expect("unknown arrival: 100.64/10, no tunnel holding one",
+       P.classify(remote: "100.101.5.6", localAddress: nil, scope: nil, interfaces: noTailnet), .internet)
+expect("a 100.64/10 peer that arrived on en0 stays internet with a tailnet up", c("100.101.5.6", local: "192.168.1.20"), .internet)
 expect("an unparseable source is internet", c("not-an-address"), .internet)
 // The doors
 let all: [P.Origin] = [.loopback, .direct, .vpn, .lan, .internet]
