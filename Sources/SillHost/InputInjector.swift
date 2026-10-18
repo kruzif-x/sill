@@ -89,7 +89,13 @@ final class InputInjector {
             }
             pointer(action, at: point(x, y, in: rect))
         case .scroll(let x, let y, let dx, let dy):
-            scroll(at: point(x, y, in: rect), dx: dx * rect.width, dy: dy * rect.height)
+            // The delta is a fraction of the source too. Bound one event to something a trackpad or
+            // a wheel can actually produce before scaling it, so a malformed value cannot reach the
+            // Int32 clamp as a "scroll to the end of the document" (or trap before it).
+            let fx = dx.isFinite ? min(max(dx, -8), 8) : 0
+            let fy = dy.isFinite ? min(max(dy, -8), 8) : 0
+            if fx != dx || fy != dy { Stats.shared.bump("in.scrollClamped") }
+            scroll(at: point(x, y, in: rect), dx: fx * rect.width, dy: fy * rect.height)
         case .text(let string):
             type(string, from: device)
         case .scrollGesture(let phase, let x, let y):
@@ -103,7 +109,21 @@ final class InputInjector {
     /// on (`.null`), where the pointer is now.
     private func point(_ x: Double, _ y: Double, in rect: CGRect) -> CGPoint {
         if rect.isNull { return pointerNow() }
-        return CGPoint(x: rect.minX + CGFloat(x) * rect.width, y: rect.minY + CGFloat(y) * rect.height)
+        // The wire carries a fraction of the streamed rectangle and nothing else. A peer that sends
+        // 1.6 — a stale rect, a rotation, a hostile or a buggy client — would otherwise land past the
+        // window: on another app, another display, or Sill's own pairing window and its TCC prompts.
+        // Clip to the half-open box `PointerControl.fraction` produces, so the far edge never falls
+        // off the source, and count what had to be clipped.
+        guard rect.width > 0, rect.height > 0, x.isFinite, y.isFinite else {
+            Stats.shared.bump("in.pointerDropped")
+            return pointerNow()
+        }
+        let maxX = max(0, 1 - 1 / Double(rect.width))
+        let maxY = max(0, 1 - 1 / Double(rect.height))
+        let cx = min(max(x, 0), maxX)
+        let cy = min(max(y, 0), maxY)
+        if cx != x || cy != y { Stats.shared.bump("in.pointerClamped") }
+        return CGPoint(x: rect.minX + CGFloat(cx) * rect.width, y: rect.minY + CGFloat(cy) * rect.height)
     }
 
     /// Where the Mac's pointer is: read (no permission) on a host that posts; on a synthetic host,
