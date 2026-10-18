@@ -1102,11 +1102,21 @@ final class StreamServer {
         }
         let deadline = DispatchWorkItem { refuse(nil) }
         queue.asyncAfter(deadline: .now() + DeviceGate.firstMessageDeadline, execute: deadline)
+        // A peer that closed by itself counts for nothing: a device's staggered dial cancels the
+        // losers of its own dial, and those must not spend the source's refusal budget and slow its
+        // next honest attempt (the same rule Door.swift states for the TLS door).
+        let closeQuietly = {
+            guard !decided else { return }
+            decided = true
+            deadline.cancel()
+            c.cancel()
+        }
         c.receive(minimumIncompleteLength: StreamMessage.headerLength, maximumLength: StreamMessage.headerLength) { [weak self] data, _, _, _ in
             guard let self, !decided else { return }
-            // An older device's viewport, pick or ping, a header no Sill sends, or the end: refused
-            // at once, its payload unread.
-            guard let data, let header = StreamMessage.parseHeader(data), header.kind == .hello,
+            guard let data else { closeQuietly(); return }
+            // An older device's viewport, pick or ping, a header no Sill sends: refused at once,
+            // its payload unread.
+            guard let header = StreamMessage.parseHeader(data), header.kind == .hello,
                   header.payloadLength <= StreamMessage.maxClientPayload else {
                 deadline.cancel()
                 refuse(nil)
@@ -1330,17 +1340,19 @@ final class StreamServer {
     }
 
     /// Each connection its own message (the devices' settings states, kind 16, one per connection):
-    /// a registered, ready connection gets its own; any other is skipped without a word, as
-    /// `broadcast` skips it, where `send(_:to:)` would print "send: no client for …" (a state can be
-    /// built for a connection the server has just forgotten, before the coordinator hears it left).
+    /// a registered, ready connection gets its own; any other is skipped and its id goes to
+    /// `skipped`, so a caller that records "sent" can tell a delivery from a drop (a settings state
+    /// nothing else would re-publish). `skipped` runs on the caller's thread, not here.
     /// Thread-safe.
-    func send(each messages: [(NWConnection, StreamMessage)]) {
+    func send(each messages: [(NWConnection, StreamMessage)], skipped: ((ObjectIdentifier) -> Void)? = nil) {
         let items = messages.map { (ObjectIdentifier($0.0), $0.1.serialized()) }
         queue.async { [self] in
+            var missed: [ObjectIdentifier] = []
             for (id, data) in items {
-                guard let client = clients[id], client.connection.state == .ready else { continue }
+                guard let client = clients[id], client.connection.state == .ready else { missed.append(id); continue }
                 send(data, to: client)
             }
+            for id in missed { skipped?(id) }
         }
     }
 
@@ -1428,9 +1440,13 @@ final class StreamServer {
                 self.receiveLoop(client)
             }
             if header.payloadLength == 0 { deliver(Data()); return }
-            c.receive(minimumIncompleteLength: header.payloadLength, maximumLength: header.payloadLength) { data, _, isComplete, error in
-                guard let data else {
-                    if isComplete || error != nil { c.cancel() }
+            c.receive(minimumIncompleteLength: header.payloadLength, maximumLength: header.payloadLength) { data, _, _, _ in
+                // Exactly the announced bytes, or nothing. The gate's own read checks the count
+                // (above); this one handed a short read to `deliver` as if it were a whole message
+                // (a truncated ping echoed back, a JSON payload silently dropped), and a nil read
+                // with neither completion nor error left the client registered with no reader at all.
+                guard let data, data.count == header.payloadLength else {
+                    c.cancel()
                     return
                 }
                 deliver(data)
