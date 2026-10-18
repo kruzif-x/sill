@@ -51,3 +51,13 @@ bundle-id change.
   right; a well-meaning "fix" of any of them is a regression.
 - The wire protocol, the pairing crypto (PBKDF2-600k over the 12-digit code, proofs bound to both TLS
   fingerprints) and the per-device trust model are upstream's and unchanged.
+
+## CI
+
+GitHub disables a fork's workflows until they are enabled in the repository's Actions tab
+(the API lists none for this fork, so `gh workflow run` answers 404). Until that click, run
+the same steps locally:
+
+    Scripts/ci-local.sh              # swift build, the pure checks, the iOS simulator build
+    Scripts/ci-local.sh --mutants    # also the mutants (an hour and more)
+
