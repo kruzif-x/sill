@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Security
 import StreamProtocol
+import CoreGraphics
 
 /// Pairing and remote access on one host (docs/remote-access-plan.md §4.10; pairing at home,
 /// docs/home-pairing-plan.md §4.6): the Mac's identity and trust list, Require pairing, the pairing
@@ -383,6 +384,9 @@ package final class RemoteAccess {
         let forRemote = !homeTLS || (byDevice == nil && userWindowsOpenRemoteDoor)
         window.open(secret: Data(secret), code: code, now: now, lifetime: lifetime, requestedBy: requestedBy,
                     byDevice: byDevice, forRemote: forRemote)
+        // A Mac with no active display cannot show this window (issue #108: a headless Mac cannot be
+        // paired at all), so the code also goes to a 0600 file and the log names it.
+        writeHeadlessPairingCode(code: code, expiresAt: now + lifetime)
         windowAsk = byDevice
         if byDevice != nil { askLimits.opened(now: monotonic()) }
         pairingState = .open(requestedBy: requestedBy, expiresAt: Date(timeIntervalSince1970: now + lifetime),
@@ -413,6 +417,32 @@ package final class RemoteAccess {
         publish()
         broadcastIfChanged()
         makeOffer(requestedBy: requestedBy, again: false)
+    }
+
+    /// Where a headless Mac's pairing code goes: Application Support/Sill/pairing-code.txt, 0600.
+    static var pairingCodeURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Sill", isDirectory: true)
+            .appendingPathComponent("pairing-code.txt")
+    }
+
+    /// A Mac with no active display cannot show the pairing window, and the code lived only there
+    /// (issue #108). The code is written to a 0600 file instead, and the log names the file; it is
+    /// removed as soon as a window opens on a Mac that does have a working display. The file holds a
+    /// code that expires in minutes, like the window it mirrors, and only its owner can read it.
+    private func writeHeadlessPairingCode(code: String, expiresAt: Double) {
+        let url = Self.pairingCodeURL
+        let display = CGMainDisplayID()
+        guard display == 0 || CGDisplayIsActive(display) == 0 else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let expiry = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: expiresAt))
+        let text = "pairing code: \(code)\nexpires: \(expiry)\nport: \(remotePort)\n"
+        FileManager.default.createFile(atPath: url.path, contents: Data(text.utf8),
+                                       attributes: [.posixPermissions: 0o600])
+        print("Pairing: no active display, so the code is in \(url.path) (0600) for \(Int(expiresAt - Date().timeIntervalSince1970)) s.")
     }
 
     /// Kind 21 from a device near the Mac (the coordinator checked the route). On a plain home
