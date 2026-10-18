@@ -381,5 +381,17 @@ check("a stranger with four keys and four addresses: three windows, then often",
 check("the first asker, 3 minutes after its window was cancelled: quiet", ask(q: limits.quiet(fingerprint: Data([0]), source: "10.0.0.9", now: 1190), n: 0) == .openOnMac("quiet"))
 check("11 minutes after the first window: a new asker gets a window again", ask(q: limits.quiet(fingerprint: Data([9]), source: "10.0.0.9", now: 1000 + 660), n: limits.recentWindows(now: 1000 + 660)) == .shown(opened: true))
 
+// The guess lockout (GuessLimits), added with the per-key and global failure counters: ten wrong
+// codes from one key in ten minutes locks that key; thirty from everyone locks the door; both
+// windows slide, and a key's own history never counts against another key.
+let t0 = 1_000.0
+check("no failures: not locked", !D.GuessLimits.locked(times: [], limit: D.GuessLimits.perKey, window: D.GuessLimits.perKeyWindow, now: t0))
+check("nine wrong codes from one key: still allowed", !D.GuessLimits.locked(times: Array(repeating: t0 - 1, count: 9), limit: D.GuessLimits.perKey, window: D.GuessLimits.perKeyWindow, now: t0))
+check("ten wrong codes from one key: locked", D.GuessLimits.locked(times: Array(repeating: t0 - 1, count: 10), limit: D.GuessLimits.perKey, window: D.GuessLimits.perKeyWindow, now: t0))
+check("ten wrong codes, all older than the window: not locked", !D.GuessLimits.locked(times: Array(repeating: t0 - 601, count: 10), limit: D.GuessLimits.perKey, window: D.GuessLimits.perKeyWindow, now: t0))
+check("the window slides: nine old, one new, ten inside it: locked", D.GuessLimits.locked(times: Array(repeating: t0 - 599, count: 9) + [t0], limit: D.GuessLimits.perKey, window: D.GuessLimits.perKeyWindow, now: t0))
+check("thirty wrong codes from every key together: the door is locked", D.GuessLimits.locked(times: Array(repeating: t0, count: 30), limit: D.GuessLimits.global, window: D.GuessLimits.globalWindow, now: t0))
+check("twenty-nine from everyone: not yet", !D.GuessLimits.locked(times: Array(repeating: t0, count: 29), limit: D.GuessLimits.global, window: D.GuessLimits.globalWindow, now: t0))
+
 print(fails == 0 ? "ALL PASS (\(passes))" : "\(fails) FAIL, \(passes) pass")
 if fails > 0 { exit(1) }

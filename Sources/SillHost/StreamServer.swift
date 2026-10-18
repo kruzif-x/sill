@@ -626,6 +626,13 @@ final class StreamServer {
         params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: port ?? .any)
     }
 
+    /// Binds a listener's parameters to one local address, so the door exists on that interface
+    /// only: a tailnet address keeps the remote door off the LAN and off the internet entirely.
+    /// A listener made with these parameters takes its port from the endpoint, like the loopback one.
+    static func bind(_ params: NWParameters, to address: String, port: NWEndpoint.Port) {
+        params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(address), port: port)
+    }
+
     /// The listener's handlers. Each first checks that `l` is still the listener, so the callbacks
     /// of one that has been replaced change nothing.
     private func wire(_ l: NWListener) {

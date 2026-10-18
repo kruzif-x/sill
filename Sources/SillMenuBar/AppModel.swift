@@ -168,6 +168,14 @@ final class AppModel {
             self?.settings.rememberRemoteDevice(prefix, at: at, route: route, keep: keep)
         }
         remote.onPairingOffer = { [weak self] offer in self?.pairingOffered(offer) }
+        // Every pairing and removal is a system notification: a device joining the trust list is
+        // something the Mac's user sees when it happens.
+        remote.onPaired = { name, _, method in
+            Task { @MainActor in PairingNotifier.shared.paired(name: name, method: method) }
+        }
+        remote.onRemoved = { name, _ in
+            Task { @MainActor in PairingNotifier.shared.removed(name: name) }
+        }
         // A device paired by itself over the USB cable: the notice, once per pairing.
         remote.onCablePaired = { [weak self] name, fingerprint in self?.showCableNotice?(CableNotice(name: name, fingerprint: fingerprint)) }
         return remote

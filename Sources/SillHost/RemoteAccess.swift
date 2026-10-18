@@ -104,11 +104,27 @@ package final class RemoteAccess {
     /// cable"), by its key prefix (`RemoteIdentity.shortName`): display only, for the pane's "last
     /// connected". The app keeps it in its defaults (`restoreSeen`, `onSeen`); trust never rests on it.
     private var lastSeen: [String: (at: Date, route: String)] = [:]
+
+    /// Wrong codes per device key (base64url fingerprint) and for every key together: the lockout
+    /// DoorPolicy.GuessLimits applies, pruned to the window it counts on every write.
+    private var guessFailures: [String: [Double]] = [:]
+    private var globalGuessFailures: [Double] = []
     /// An offer waiting for the door's port and the first address list (at most `offerWait`).
     private var offerPending: (requestedBy: String?, again: Bool, askedBy: String?)?
     private var offerDeadline: Task<Void, Never>?
     private var expiryTask: Task<Void, Never>?
     static let offerWait: TimeInterval = 3
+
+    /// The address the remote door binds, when the Mac's user asked for one: `SillRemoteBind` in the
+    /// app's defaults, or SILL_REMOTE_BIND in the environment (the CLI). Nil — every interface — is
+    /// the default, as every release so far has run. A tailnet address here means the door exists on
+    /// the tunnel only: nothing on the LAN, nothing on the internet, whatever the other switches say.
+    static func remoteBindAddress(environment: [String: String] = ProcessInfo.processInfo.environment,
+                                  defaults: UserDefaults = .standard) -> String? {
+        if let v = environment["SILL_REMOTE_BIND"]?.trimmingCharacters(in: .whitespaces), !v.isEmpty { return v }
+        if let v = defaults.string(forKey: "SillRemoteBind")?.trimmingCharacters(in: .whitespaces), !v.isEmpty { return v }
+        return nil
+    }
 
     /// The asks' limits (AskLimits): a monotonic clock, so a clock change moves nothing.
     private var askLimits = AskLimits()
@@ -141,6 +157,10 @@ package final class RemoteAccess {
     /// A device paired by itself over the USB cable (its paired name and fingerprint): the app's
     /// notice. The core prints the line.
     package var onCablePaired: ((_ name: String, _ fingerprint: String) -> Void)?
+    /// Every pairing, whatever its method, and every removal: the app's alert. The core prints an
+    /// AUDIT line either way, so a Mac with no UI (the CLI, a headless host) still records it.
+    package var onPaired: ((_ name: String, _ fingerprint: String, _ method: String) -> Void)?
+    package var onRemoved: ((_ name: String, _ fingerprint: String) -> Void)?
 
     /// TEST ONLY: the file store's directory, where a test hook may leave the current pairing link
     /// and code; nil for every other store.
@@ -193,6 +213,8 @@ package final class RemoteAccess {
             identity.txtRecord(homeDoor: tls ? HomeDoorTXT.value(requirePairing: box.snapshot.requirePairing) : nil)
         }
         let door = RemoteServer(server: server, identity: identity, trust: trust)
+        door.bindAddress = Self.remoteBindAddress()
+        if let bind = door.bindAddress { print("Remote door: binding \(bind) only, so it exists on that interface and nowhere else.") }
         door.onListener = { [weak self] state in Task { @MainActor in self?.listenerChanged(state) } }
         let judgeHere: (Door.PairAttempt, @escaping @Sendable (PairResult) -> Void) -> Void = { [weak self] attempt, reply in
             Task { @MainActor in
@@ -386,7 +408,7 @@ package final class RemoteAccess {
                     byDevice: byDevice, forRemote: forRemote)
         // A Mac with no active display cannot show this window (issue #108: a headless Mac cannot be
         // paired at all), so the code also goes to a 0600 file and the log names it.
-        writeHeadlessPairingCode(code: code, expiresAt: now + lifetime)
+        writeHeadlessPairingCode(code: code, expiresAt: now + lifetime, byDevice: byDevice)
         windowAsk = byDevice
         if byDevice != nil { askLimits.opened(now: monotonic()) }
         pairingState = .open(requestedBy: requestedBy, expiresAt: Date(timeIntervalSince1970: now + lifetime),
@@ -427,14 +449,23 @@ package final class RemoteAccess {
     }
 
     /// A Mac with no active display cannot show the pairing window, and the code lived only there
-    /// (issue #108). The code is written to a 0600 file instead, and the log names the file; it is
-    /// removed as soon as a window opens on a Mac that does have a working display. The file holds a
-    /// code that expires in minutes, like the window it mirrors, and only its owner can read it.
-    private func writeHeadlessPairingCode(code: String, expiresAt: Double) {
+    /// (issue #108). With `SillHeadlessPairing` set, the code also goes to a 0600 file and the log
+    /// names it; without it, nothing is written and the log says so once. Only a window the Mac's
+    /// user opened is written: a window a device asked for is that device's own secret, and a file
+    /// would hand it to every process running as this user. `windowClosed` deletes the file.
+    private func writeHeadlessPairingCode(code: String, expiresAt: Double, byDevice: PairingWindow.DeviceAsk?) {
         let url = Self.pairingCodeURL
         let display = CGMainDisplayID()
         guard display == 0 || CGDisplayIsActive(display) == 0 else {
             try? FileManager.default.removeItem(at: url)
+            return
+        }
+        guard byDevice == nil else {
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        guard UserDefaults.standard.bool(forKey: "SillHeadlessPairing") else {
+            print("Pairing: no active display. To pair this Mac headless, set SillHeadlessPairing and open the window again.")
             return
         }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -491,6 +522,10 @@ package final class RemoteAccess {
         if let fp = device.fingerprintData { lastSeen[RemoteIdentity.shortName(fp)] = nil }
         publishTrust()
         publish()
+        // Removal is an audit event too: a device that leaves the list should be as visible as one
+        // that joins it.
+        print("AUDIT: removed \(device.displayName) (key \(device.fingerprint.prefix(8))…).")
+        onRemoved?(device.displayName, device.fingerprint)
         let fp = device.fingerprintData
         server?.closeSessions(Goodbye.removed, matching: { fp != nil && $0.fingerprint == fp }, done: { n in
             print("Removed \(device.displayName); closed \(n) connection\(n == 1 ? "" : "s").")
@@ -549,6 +584,19 @@ package final class RemoteAccess {
         publish()
     }
 
+    /// One wrong code from `key`, counted for that key and for every key together, each list pruned
+    /// to the window it counts so neither grows with time. Keys that have gone quiet are dropped
+    /// once the map is large, so a stranger guessing from many keys cannot grow it without bound.
+    private func noteWrongCode(_ key: String, now: Double) {
+        let perKey = DoorPolicy.GuessLimits.perKeyWindow
+        guessFailures[key] = (guessFailures[key] ?? []).filter { now - $0 < perKey } + [now]
+        let global = DoorPolicy.GuessLimits.globalWindow
+        globalGuessFailures = globalGuessFailures.filter { now - $0 < global } + [now]
+        if guessFailures.count > 64 {
+            guessFailures = guessFailures.filter { _, times in times.contains { now - $0 < perKey } }
+        }
+    }
+
     /// Judges one kind 19 (a door hands it over; the reply goes back to it). An ask never reaches
     /// the window, whose unknown methods count as wrong codes: at home the ask rule decides, and
     /// the remote door never gets this far with one (it answers `closed` itself). A proof at the
@@ -569,6 +617,18 @@ package final class RemoteAccess {
         let wasOpen = window.isOpen
         let proof = Base64URL.decode(attempt.request.proof) ?? Data()
         let now = Date().timeIntervalSince1970
+        // A key that has spent its guesses is refused before its proof is looked at, whatever window
+        // is open and whatever address it dialled from: the loop delay counts sources, and a key is
+        // the thing that is stable.
+        let key = Base64URL.encode(attempt.deviceFingerprint)
+        let locked = DoorPolicy.GuessLimits.locked(times: guessFailures[key] ?? [], limit: DoorPolicy.GuessLimits.perKey,
+                                                   window: DoorPolicy.GuessLimits.perKeyWindow, now: now)
+            || DoorPolicy.GuessLimits.locked(times: globalGuessFailures, limit: DoorPolicy.GuessLimits.global,
+                                            window: DoorPolicy.GuessLimits.globalWindow, now: now)
+        if locked {
+            print("Pairing: \(Self.displayName(attempt.request)) is locked out after repeated wrong codes.")
+            return PairResult(ok: false, reason: PairResult.busy)
+        }
         let verdict = window.tryProof(method: attempt.request.method, proof: proof, fpDevice: attempt.deviceFingerprint,
                                       fpMac: identity.fingerprint, source: attempt.source, now: now)
         switch verdict {
@@ -585,8 +645,11 @@ package final class RemoteAccess {
             paired.append(device)
             save()
             publishTrust()
-            print("Paired \(device.displayName) (key \(RemoteIdentity.shortName(attempt.deviceFingerprint))…) from \(attempt.display), "
+            print("AUDIT: paired \(device.displayName) (key \(RemoteIdentity.shortName(attempt.deviceFingerprint))…) from \(attempt.display), "
                   + "with \(attempt.request.method == PairRequest.qr ? "the QR code" : "the code").")
+            onPaired?(device.displayName, device.fingerprint, attempt.request.method)
+            // A key that just proved the code starts clean; its earlier misses are spent.
+            guessFailures[key] = nil
             pairingState = .paired(device.displayName)
             requestAnswered(by: attempt.deviceFingerprint)
             windowClosed(.used, reopen: true)
@@ -594,6 +657,7 @@ package final class RemoteAccess {
                               recognitionKey: Base64URL.encode(identity.recognitionKey))
         case .reject(let left):
             print("Pairing: a wrong code from \(attempt.display) (\(left) tr\(left == 1 ? "y" : "ies") left).")
+            noteWrongCode(key, now: now)
             if case .open(let requestedBy, let expiresAt, _, _, let byDevice) = pairingState {
                 pairingState = .open(requestedBy: requestedBy, expiresAt: expiresAt, triesLeft: left, lastWrongFrom: attempt.display,
                                      byDevice: byDevice)
@@ -714,9 +778,10 @@ package final class RemoteAccess {
         paired = next
         publishTrust()
         publish()
-        print("Paired \(device.displayName) (key \(RemoteIdentity.shortName(a.deviceFingerprint))…) over the USB cable (\(a.display)).")
+        print("AUDIT: paired \(device.displayName) (key \(RemoteIdentity.shortName(a.deviceFingerprint))…) over the USB cable (\(a.display)).")
         pairedNow()
         onCablePaired?(device.displayName, fingerprint)
+        onPaired?(device.displayName, fingerprint, PairResult.cable)
         return ok
     }
 
@@ -803,6 +868,8 @@ package final class RemoteAccess {
     /// stops if Remote Access is off), the status. The CLI then opens a fresh one after a use, an
     /// expiry or a withdrawal.
     private func windowClosed(_ reason: PairingWindow.CloseReason, reopen: Bool) {
+        // The headless code file lives exactly as long as the window it mirrors.
+        try? FileManager.default.removeItem(at: Self.pairingCodeURL)
         expiryTask?.cancel()
         expiryTask = nil
         offerPending = nil

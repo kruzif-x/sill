@@ -38,6 +38,10 @@ final class RemoteServer {
     private var listener: NWListener?
     private var wanted = false
     private var port = HostConfig.defaultRemotePort
+    /// When set, the door binds this local address only (a tailnet address, say) instead of every
+    /// interface: the listener then never exists on the LAN or the internet. Set once, before the
+    /// door runs (RemoteAccess, from `SillRemoteBind`); nil is every interface, as always.
+    var bindAddress: String?
     private var retryItem: DispatchWorkItem?
     private var reportedFailure = false
 
@@ -94,6 +98,11 @@ final class RemoteServer {
                 guard let p = NWEndpoint.Port(rawValue: UInt16(port)) else { failed(.posix(.EINVAL)); return }
                 if server.loopbackOnly {   // TEST ONLY: SILL_TEST_LOOPBACK (StreamServer)
                     StreamServer.bindToLoopback(params, port: p)
+                    l = try NWListener(using: params)
+                } else if let bind = bindAddress {
+                    // One interface only: the Mac's user asked the door to exist on this address
+                    // (SillRemoteBind), so a tailnet door is never on the LAN or the internet.
+                    StreamServer.bind(params, to: bind, port: p)
                     l = try NWListener(using: params)
                 } else {
                     l = try NWListener(using: params, on: p)

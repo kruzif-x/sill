@@ -16,6 +16,27 @@ enum DoorPolicy {
     /// A remote door's sessions at once; the ninth gets goodbye `busy`.
     static let maxRemoteSessions = 8
 
+    /// Code guesses allowed before a key is refused for a while, and before every key is. The
+    /// pairing window bounds one window's five tries; these bound one key across windows and source
+    /// addresses (a key is stable, an address is not), and all keys together, so a guess spread over
+    /// many source addresses cannot outrun the per-source loop delay forever.
+    enum GuessLimits {
+        static let perKey = 10
+        static let perKeyWindow = 600.0
+        static let global = 30
+        static let globalWindow = 600.0
+
+        /// True while `times` holds `limit` failures inside `window` of `now`.
+        static func locked(times: [Double], limit: Int, window: Double, now: Double) -> Bool {
+            var seen = 0
+            for t in times where now - t < window {
+                seen += 1
+                if seen >= limit { return true }
+            }
+            return false
+        }
+    }
+
     /// What admission knows about one connection: its key, and the Mac's switches as the
     /// TrustSnapshot has them.
     struct Trust: Equatable, Sendable {

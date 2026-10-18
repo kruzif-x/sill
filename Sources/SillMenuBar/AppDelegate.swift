@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
         model.showCableNotice = { [weak self] notice in self?.showCableNotice(notice) }
+        // Notifications for a device joining or leaving the trust list: asked for once, here, where
+        // the prompt belongs; every pairing still writes an AUDIT line either way.
+        PairingNotifier.shared.requestPermission()
         // Always, not only with the virtual display on: Settings can turn it on at any time, and a
         // kill must then still put the streamed window back.
         HostShutdown.install { [model] in model.coordinator }
