@@ -34,7 +34,10 @@ struct SettingsPane: View {
         // idle Sill with Settings closed wakes for nothing. The Devices and Remote Access panes
         // follow the host's status, which is pushed, so they poll nothing.
         .task(id: model.visibleSettingsTab == tab) {
-            guard model.visibleSettingsTab == tab, tab != .streaming, tab != .devices, tab != .remoteAccess else { return }
+            // An allow-list, not an exclusion list: a pane added later polls nothing until it says
+            // it shows permission state (Virtual Display was polling four system calls a second on
+            // a panel that shows none of them).
+            guard model.visibleSettingsTab == tab, tab == .permissions || tab == .general else { return }
             while !Task.isCancelled {
                 model.permissions.refresh()
                 model.loginItem.refresh()

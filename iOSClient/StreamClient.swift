@@ -885,6 +885,7 @@ final class StreamClient: ObservableObject {
         // The hello is built here, on the main thread: it reads UIDevice (the device's name), which
         // the network queue, where connections become ready and send it, must not be first to touch.
         _ = Self.helloPayload
+        _ = Self.ownDeviceName
         #if DEBUG
         // Read from the command line itself: the argument domain drops a value that starts like a
         // property list but is not one, and JSON's "[" is such a start.
@@ -1146,6 +1147,18 @@ final class StreamClient: ObservableObject {
         moveHomeIfListed()
     }
 
+    /// `Self.ownAddresses()` for this pass: the getifaddrs walk at most once a second. `recomputeMacs`
+    /// runs on every browse event (and again on the 3 s policy recheck), and a second's staleness is
+    /// far fresher than the network path the answer describes.
+    private var ownAddressesCache: (at: Double, addresses: [(interface: String, address: [UInt8])])?
+    private func ownAddressesForThisPass() -> [(interface: String, address: [UInt8])] {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cache = ownAddressesCache, now - cache.at < 1 { return cache.addresses }
+        let fresh = Self.ownAddresses()
+        ownAddressesCache = (now, fresh)
+        return fresh
+    }
+
     /// The rows, each with the endpoint of the browser that listed it: a network row always the
     /// network browser's, so at home a Mac is never reached over AWDL. Each row's word comes from
     /// the interfaces that same browser saw its Mac on (DiscoveryPolicy.method), and so does the
@@ -1206,8 +1219,10 @@ final class StreamClient: ObservableObject {
             #endif
         }
         // This device's own addresses: whether a Wired row's interface carries only link-local ones
-        // (the USB cable to the Mac) or a network's (a USB Ethernet adapter), for its word.
-        let own = Self.ownAddresses()
+        // (the USB cable to the Mac) or a network's (a USB Ethernet adapter), for its word. Cached for
+        // a second: a browse event costs a getifaddrs walk otherwise, and the connect screen is
+        // animating exactly when the LAN's mDNS is chatty.
+        let own = ownAddressesForThisPass()
         // The saved Macs by the Bonjour name each was last reached under, most recently used first:
         // a row whose tag names none of them is the one of its name (DiscoveryPolicy.rowMac).
         let byName = savedMacs.sorted { ($0.lastConnectedAt ?? $0.pairedAt) > ($1.lastConnectedAt ?? $1.pairedAt) }
@@ -1736,6 +1751,10 @@ final class StreamClient: ObservableObject {
         if let params = sessionParameters(trust, peerToPeer: false) { return params }
         return DeviceTLS.refusing(peerToPeer: false, queue: queue)
     }
+
+    /// This device's name, read once on the main thread (`init` touches it, like `helloPayload`): the
+    /// pairing exchange runs on the network queue and must not be the first to call UIDevice.
+    static let ownDeviceName: String = UIDevice.current.name
 
     /// This device's hello (kind 23): its version, build, protocol and name, built once. DEBUG:
     /// `-SillHelloVersion <v>` replaces the version, for a host's device floor under test.
