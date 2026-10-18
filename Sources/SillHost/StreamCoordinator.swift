@@ -185,6 +185,15 @@ package final class StreamCoordinator {
     /// opened, which the opposite gesture closes (GestureChords), and each connection's gestures of
     /// the last second: `gesturesPerSecond` a second, the rest dropped with one line a minute.
     private var gestureChords = GestureChords()
+    /// Input events a connection may send a second. A 120 Hz Pencil drag with modifiers held is
+    /// under ~200, so 400 leaves an honest client alone; beyond it, each 60-byte message would cost
+    /// a main-actor Task and a synthetic HID event, which is what a runaway or hostile client sends.
+    static let inputPerSecond = 400
+    /// Each connection's current second and its events in it (`inputAllowed`).
+    private var inputWindows: [ObjectIdentifier: (second: Double, count: Int)] = [:]
+    private lazy var inputDrops = RefusalSummary(queue: .main, categories: ["rate"]) { counts in
+        "Input ignored: \(counts["rate"] ?? 0) events in a minute, from a device sending more than \(StreamCoordinator.inputPerSecond) a second."
+    }
     private var gestureArrivals: [ObjectIdentifier: [CFAbsoluteTime]] = [:]
     static let gesturesPerSecond = 4
     private lazy var gestureDrops = RefusalSummary(queue: .main, categories: ["gestures"]) { counts in
@@ -398,6 +407,7 @@ package final class StreamCoordinator {
                 self.connections[id] = nil
                 self.lastPublished[id] = nil
                 self.settingsRetries[id] = nil
+                self.inputWindows[id] = nil
                 self.linkReports[id] = nil
                 if self.flipWait == id { self.flipWait = nil }
                 self.menus.clientLeft(connection)
@@ -916,6 +926,9 @@ package final class StreamCoordinator {
         case .input:
             guard let event = Wire.decode(InputEvent.self, from: message.payload) else { return }
             let device = ObjectIdentifier(connection)
+            // The one inbound kind that had no ceiling: gestures, settings and clipboard are all
+            // limited per connection, and this is the hot path a client can flood.
+            guard inputAllowed(device) else { return }
             guard let rect = currentSourceRect() else {
                 // Nothing streams (between sources, or the stream stopped: the window closed under a
                 // drag): input has nowhere to land. The up of a key or a button the Mac has down still
@@ -2421,6 +2434,22 @@ package final class StreamCoordinator {
         if let p = s.virtualDisplayProblem { return "Off for this session: \(p). Turn it off and on to try again." }
         if let f = s.lastStageFailure { return "The last window streamed where it is: \(f)" }
         return nil
+    }
+
+    /// True while `id` is inside its input budget for the current second. A dropped event is counted
+    /// and summarized once a minute, like the gesture and settings limits. Main actor, like the
+    /// handle that calls it.
+    private func inputAllowed(_ id: ObjectIdentifier) -> Bool {
+        let now = ProcessInfo.processInfo.systemUptime
+        var window = inputWindows[id] ?? (second: now, count: 0)
+        if now - window.second >= 1 { window = (second: now, count: 0) }
+        window.count += 1
+        inputWindows[id] = window
+        guard window.count <= Self.inputPerSecond else {
+            inputDrops.count("rate")
+            return false
+        }
+        return true
     }
 
     private func settingsMessage(_ state: HostSettingsState) -> StreamMessage {
