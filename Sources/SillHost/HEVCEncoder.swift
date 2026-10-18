@@ -512,13 +512,15 @@ final class HEVCEncoder {
             ps = Self.parameterSets(from: desc)
             lock.lock(); forcedRetries = 0; lock.unlock()
         }
-        guard let block = CMSampleBufferGetDataBuffer(sb) else { return }
+        guard let block = CMSampleBufferGetDataBuffer(sb) else { Stats.shared.bump("enc.noData"); return }
         let length = CMBlockBufferGetDataLength(block)
         var data = Data(count: length)
         let copied = data.withUnsafeMutableBytes { raw -> OSStatus in
             CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length, destination: raw.baseAddress!)
         }
-        guard copied == noErr else { return }
+        // Every other way a frame can be lost is counted, which is what makes this pipeline
+        // diagnosable from the stats line; a silent return here would read as "stuck, counters fine".
+        guard copied == noErr else { Stats.shared.bump("enc.copyFailed"); return }
         onEncoded?(data, isKey, ps)
     }
 

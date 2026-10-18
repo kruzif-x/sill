@@ -119,6 +119,8 @@ final class WindowCatalog {
     /// Refreshes can overlap (startup call plus the first poll); only the newest result applies.
     private var refreshSeq = 0
     private var appliedSeq = 0
+    /// When the "ScreenCaptureKit refused" line last printed (throttled to one a minute).
+    private var lastCatalogErrorLine: Double = 0
 
     static let ownPID = ProcessInfo.processInfo.processIdentifier
 
@@ -229,7 +231,20 @@ final class WindowCatalog {
     func refreshWindows() async {
         refreshSeq += 1
         let seq = refreshSeq
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
+        let content: SCShareableContent
+        do {
+            content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        } catch {
+            // Silence here froze the window list for as long as SCK kept failing (Screen Recording
+            // revoked mid-run is the common one): the list never changed and nothing said why.
+            Stats.shared.bump("cat.error")
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastCatalogErrorLine > 60 {
+                lastCatalogErrorLine = now
+                print("Window list: ScreenCaptureKit refused (\(error)); the list stays as it is until it answers")
+            }
+            return
+        }
         // The staged window, if the on-screen list dropped it: one extra SCShareableContent call per
         // poll, and only then. Fetched before the sequence check so its await cannot let an older
         // refresh overwrite a newer one.
