@@ -448,24 +448,20 @@ package final class RemoteAccess {
             .appendingPathComponent("pairing-code.txt")
     }
 
-    /// A Mac with no active display cannot show the pairing window, and the code lived only there
-    /// (issue #108). With `SillHeadlessPairing` set, the code also goes to a 0600 file and the log
-    /// names it; without it, nothing is written and the log says so once. Only a window the Mac's
-    /// user opened is written: a window a device asked for is that device's own secret, and a file
-    /// would hand it to every process running as this user. `windowClosed` deletes the file.
+    /// A Mac with no one watching its screen — headless, or a laptop with its lid shut — cannot be
+    /// paired by reading a window. With `SillHeadlessPairing` set, every window's code also goes to
+    /// a 0600 file and the log names it; without the flag nothing is written and the log says so
+    /// once. A window a device asked for is included: on such a Mac it is the only channel, and the
+    /// ask rule has already decided the device may have one. `windowClosed` deletes the file, so it
+    /// lives exactly as long as the code does.
     private func writeHeadlessPairingCode(code: String, expiresAt: Double, byDevice: PairingWindow.DeviceAsk?) {
         let url = Self.pairingCodeURL
-        let display = CGMainDisplayID()
-        guard display == 0 || CGDisplayIsActive(display) == 0 else {
-            try? FileManager.default.removeItem(at: url)
-            return
-        }
-        guard byDevice == nil else {
-            try? FileManager.default.removeItem(at: url)
-            return
-        }
         guard UserDefaults.standard.bool(forKey: "SillHeadlessPairing") else {
-            print("Pairing: no active display. To pair this Mac headless, set SillHeadlessPairing and open the window again.")
+            try? FileManager.default.removeItem(at: url)
+            let display = CGMainDisplayID()
+            if display == 0 || CGDisplayIsActive(display) == 0 {
+                print("Pairing: no active display. To pair this Mac headless, set SillHeadlessPairing and open the window again.")
+            }
             return
         }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -473,7 +469,7 @@ package final class RemoteAccess {
         let text = "pairing code: \(code)\nexpires: \(expiry)\nport: \(remotePort)\n"
         FileManager.default.createFile(atPath: url.path, contents: Data(text.utf8),
                                        attributes: [.posixPermissions: 0o600])
-        print("Pairing: no active display, so the code is in \(url.path) (0600) for \(Int(expiresAt - Date().timeIntervalSince1970)) s.")
+        print("Pairing: \(byDevice == nil ? "opened on this Mac" : "asked for by a device"); the code is in \(url.path) (0600) for \(Int(expiresAt - Date().timeIntervalSince1970)) s.")
     }
 
     /// Kind 21 from a device near the Mac (the coordinator checked the route). On a plain home
