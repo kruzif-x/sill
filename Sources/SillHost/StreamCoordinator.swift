@@ -1480,6 +1480,18 @@ package final class StreamCoordinator {
         encoder = enc
         active = source
         print("Streaming \(describe) at \(width)×\(height), \(fps) fps, \(streamBitrate / 1_000_000) Mbps")
+        // A capture stream that starts and never delivers a frame has no stop error and no frames:
+        // the device shows black, the encoder's watchdog has nothing to clock, and every counter
+        // reads zero. One line, 1.5 s in, if that is what happened. A source switch moves `active`,
+        // so a check that outlived its stream says nothing.
+        if filter != nil {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .seconds(WindowCapture.firstFrameTimeout))
+                guard let self, self.active == source, self.capture.framesDelivered == 0 else { return }
+                Stats.shared.bump("cap.noFirstFrame")
+                print("Capture: no frame after \(WindowCapture.firstFrameTimeout) s (\(describe)) — the stream is registered and delivers nothing")
+            }
+        }
         status.update {
             $0.stream = HostStatusSnapshot.Stream(kind: kind, title: title, width: width, height: height, fps: fps,
                                                   mbps: streamBitrate / 1_000_000, onVirtualDisplay: sourceRect != nil,

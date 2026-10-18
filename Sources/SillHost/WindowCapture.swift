@@ -5,6 +5,23 @@ import CoreMedia
 /// Runs one ScreenCaptureKit stream (a window or a display) and hands out 420f pixel buffers.
 /// The coordinator stops and restarts it whenever the client picks a different source.
 final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
+    /// Why `start` can refuse: a stream that did not stop would otherwise be overwritten, and its
+    /// frames would reach the new encoder at the old size (the header's macOS 27 wedge).
+    enum Failure: LocalizedError {
+        case streamStillRunning
+        var errorDescription: String? {
+            switch self {
+            case .streamStillRunning:
+                return "the previous capture stream is still registered: it did not stop"
+            }
+        }
+    }
+
+    /// How long a started stream may go without a first frame before the coordinator says so. A
+    /// stream that starts and never delivers is otherwise silent forever: no stop error, no frame,
+    /// every counter zero, and the device shows black with nothing to explain it.
+    static let firstFrameTimeout = 1.5
+
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "sill.capture", qos: .userInteractive)
     var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
@@ -22,6 +39,14 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// staged window's rectangle, so the device gets the window and nothing else. Nil (the default,
     /// and the whole default path) leaves the configuration exactly as it was.
     func start(filter: SCContentFilter, width: Int, height: Int, fps: Int, showsCursor: Bool, sourceRect: CGRect? = nil) async throws {
+        if let stream {
+            // Never two streams on this queue: the old one's frames would be handed to the encoder
+            // the coordinator has already pointed `onFrame` at, at the wrong size, and the old
+            // encoder would be pinned by that closure (its deinit is the only VT invalidation).
+            print("Capture: start refused, a stream is still registered (\(stream))")
+            Stats.shared.bump("cap.startWhileRunning")
+            throw Failure.streamStillRunning
+        }
         let config = SCStreamConfiguration()
         config.width = width
         config.height = height
@@ -41,7 +66,10 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         // Register before starting: a stop error that arrives during start must not be swallowed
         // by the identity check in didStopWithError.
         self.stream = stream
-        framesSeen = 0
+        // `framesSeen` belongs to `queue`, which the sample callback runs on: reset it there rather
+        // than on the thread calling start (an unsynchronised `var` written from two threads is a
+        // data race, however unlikely the overlap).
+        queue.sync { framesSeen = 0 }
         do {
             try await stream.startCapture()
         } catch {
@@ -52,15 +80,27 @@ final class WindowCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         print("Capture started: \(width)×\(height) @\(fps) fps, cursor \(showsCursor ? "in" : "out"), filter \(filter.contentRect.size) scale \(filter.pointPixelScale)" + crop)
     }
 
-    private var framesSeen = 0
+    private var framesSeen = 0   // on `queue`
+    /// Frames delivered since `start`, read through the queue so the coordinator's first-frame
+    /// check cannot race the sample callback.
+    var framesDelivered: Int { queue.sync { framesSeen } }
     /// Held by the type: `SCStreamConfiguration.backgroundColor` is unowned(unsafe) and would not keep
     /// a temporary alive.
     private static let black = CGColor(gray: 0, alpha: 1)
 
     func stop() async {
         guard let stream else { return }
-        self.stream = nil
-        try? await stream.stopCapture()
+        do {
+            try await stream.stopCapture()
+            self.stream = nil
+        } catch {
+            // The handle stays: a stream that refused to stop keeps delivering to this capture queue,
+            // and dropping the reference would make it both unretryable and invisible (start() then
+            // refuses rather than building a second one over it). This is the wedge the header
+            // describes, so it gets a line rather than a `try?`.
+            print("Capture: stopCapture failed (\(error)); the stream is still registered")
+            Stats.shared.bump("cap.stopFailed")
+        }
         // stopCapture returning does not mean the sample-handler queue has drained. Wait for it,
         // so no late frame reaches the next encoder at the old size.
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in queue.async { c.resume() } }
