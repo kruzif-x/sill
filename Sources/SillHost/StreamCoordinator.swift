@@ -397,6 +397,7 @@ package final class StreamCoordinator {
                 self.lastPairingWanted[id] = nil
                 self.connections[id] = nil
                 self.lastPublished[id] = nil
+                self.settingsRetries[id] = nil
                 self.linkReports[id] = nil
                 if self.flipWait == id { self.flipWait = nil }
                 self.menus.clientLeft(connection)
@@ -2360,6 +2361,12 @@ package final class StreamCoordinator {
     /// Answers never touch it.
     private var lastPublished: [ObjectIdentifier: HostSettingsState] = [:]
 
+    /// A skipped state's retries: how many, and when the streak began. Five tries inside ten
+    /// seconds, then the connection waits for a real change (see `retrySettings`).
+    private var settingsRetries: [ObjectIdentifier: (count: Int, since: Double)] = [:]
+    static let settingsRetryLimit = 5
+    static let settingsRetryWindow = 10.0
+
     /// Connection `id`'s state (docs/remote-bundle-plan.md §5.4): the pair its controls set (the
     /// away quality for a device away), the home and away qualities with which one is the target
     /// (`away`, from a host with an identity, `remote`: SillHost --pairing alone too, where no
@@ -2419,7 +2426,35 @@ package final class StreamCoordinator {
             lastPublished[id] = state
             messages.append((connection, settingsMessage(state)))
         }
-        if !messages.isEmpty { server.send(each: messages) }
+        guard !messages.isEmpty else { return }
+        // `send(each:)` skips a connection the server has forgotten, or one whose transport is not
+        // ready (a path change, a Wi-Fi blip). Recording the state as sent and never hearing about
+        // the skip left that device's panel on the old quality or rate for the life of its
+        // connection — nothing else would ever publish the same state again.
+        server.send(each: messages) { [weak self] id in
+            Task { @MainActor in self?.retrySettings(id) }
+        }
+    }
+
+    /// A state the transport skipped: forget it (so the next publish sends it again) and try once
+    /// more a second later, while the connection is still there and the failure is recent. A
+    /// connection that never becomes ready is not chased forever; its own teardown decides.
+    private func retrySettings(_ id: ObjectIdentifier) {
+        lastPublished[id] = nil
+        guard connections[id] != nil else { settingsRetries[id] = nil; return }
+        let now = ProcessInfo.processInfo.systemUptime
+        var attempt = settingsRetries[id] ?? (count: 0, since: now)
+        if now - attempt.since > StreamCoordinator.settingsRetryWindow { attempt = (0, now) }
+        attempt.count += 1
+        guard attempt.count <= StreamCoordinator.settingsRetryLimit else {
+            settingsRetries[id] = nil
+            return
+        }
+        settingsRetries[id] = attempt
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            self?.publishSettings()
+        }
     }
 
     /// "iPad (iPad14,1)" once the device has sent its stats, its address until then.
